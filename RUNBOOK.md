@@ -360,75 +360,175 @@ aws s3api get-bucket-encryption --bucket $auditBucket --region us-east-1
 ## Step 7: Validation testing with non-compliant resources
 This step is manual and deliberately opt-in. The fixture is separate from the root stack so a normal root apply does not create unsafe resources.
 
-From a separate terminal, deploy the fixture with a unique bucket name:
+Run the following commands from the repository root in PowerShell. Use the same AWS account and region where the root stack is deployed. The fixture creates three intentionally unsafe resources:
 
-```powershell
-Push-Location examples
-terraform init
-terraform validate
-terraform plan -var='test_bucket_name=compliance-test-123456789012-20260903' -out test-resources.tfplan
-terraform apply test-resources.tfplan
-Pop-Location
-```
+- S3 bucket and public-read bucket policy, tagged `Environment=non-prod`
+- IAM role with `AdministratorAccess`, tagged `Environment=non-prod`
+- Security Group with public TCP/22 ingress, tagged `Environment=prod`
 
-The fixture creates the three scenarios below. Wait for Config evaluation and EventBridge delivery before checking results; this can take several minutes.
+Do not substitute the root `aws-config-delivery-*` or `compliance-evidence-vault-*` bucket names. The fixture creates a separate disposable bucket.
 
-### Test 1: Public S3 bucket
-Create a bucket in non-prod and set a public policy.
-
-```bash
-aws s3api create-bucket --bucket nonprod-public-s3-demo --region us-east-1
-```
-
-Then apply a public-read bucket policy.
-
-Expected behavior:
-
-- Non-Prod: Lambda auto-remediates and removes public access
-- Prod: resource is quarantined, alert published, and evidence stored in S3 WORM vault
-
-### Test 2: Unapproved IAM admin policy
-Create a user or role and attach an administrator policy.
-
-```bash
-aws iam attach-user-policy --user-name test-user --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
-```
-
-Expected behavior:
-
-- Non-Prod: policy is detached automatically if it is not approved
-- Prod: policy is detached or restricted, the owner is alerted, and the event is logged
-
-### Test 3: Open security group ingress
-Create a Security Group and open ingress to 0.0.0.0/0.
-
-```bash
-aws ec2 authorize-security-group-ingress \
-  --group-id sg-1234567890abcdef0 \
-  --protocol tcp \
-  --port 22 \
-  --cidr 0.0.0.0/0
-```
-
-Expected behavior:
-
-- Non-Prod: ingress rule is removed automatically
-- Prod: ingress rule is revoked, alerts are triggered, and the action is recorded
-
-## Step 8: Validate events, remediation, and evidence
-
-Run these checks after each fixture event:
+### 7.1 Deploy the fixture
 
 ```powershell
 $region = "us-east-1"
-$bucket = terraform -chdir=examples output -raw noncompliant_s3_bucket_arn
+$fixtureBucket = "compliance-test-$((Get-Random -Minimum 100000000 -Maximum 999999999))"
+
+Push-Location examples
+terraform init
+terraform validate
+terraform plan -var="aws_region=$region" -var="test_bucket_name=$fixtureBucket" -out test-resources.tfplan
+terraform apply test-resources.tfplan
+terraform output
+Pop-Location
+```
+
+Capture the resource identifiers for later commands:
+
+```powershell
+$fixtureBucketArn = terraform -chdir=examples output -raw noncompliant_s3_bucket_arn
+$fixtureBucket = $fixtureBucketArn -replace '^arn:aws:s3:::', ''
+$adminRoleArn = terraform -chdir=examples output -raw admin_role_arn
+$adminRoleName = $adminRoleArn.Split('/')[-1]
 $groupId = terraform -chdir=examples output -raw prod_open_security_group_id
+$topicArn = terraform output -raw secops_alert_topic_arn
+$auditBucket = terraform output -raw audit_bucket_name
+
+Write-Host "Fixture bucket: $fixtureBucket"
+Write-Host "IAM role: $adminRoleName"
+Write-Host "Security Group: $groupId"
+```
+
+### 7.2 Confirm the initial violations
+
+Run these checks immediately after the fixture apply. They prove that the test resources were created in the intentionally non-compliant state before remediation runs:
+
+```powershell
+# S3: public policy exists and the bucket is tagged non-prod.
+aws s3api get-bucket-policy --bucket $fixtureBucket --region $region
+aws s3api get-bucket-tagging --bucket $fixtureBucket --region $region
+aws s3api get-bucket-policy-status --bucket $fixtureBucket --region $region
+
+# IAM: AdministratorAccess is attached to the fixture role.
+aws iam list-attached-role-policies --role-name $adminRoleName
+aws iam list-role-tags --role-name $adminRoleName
+
+# EC2: the fixture Security Group exposes TCP/22 to the internet.
+aws ec2 describe-security-groups --group-ids $groupId --region $region `
+  --query 'SecurityGroups[0].IpPermissions'
+```
+
+### 7.3 Wait for detection and remediation
+
+AWS Config evaluation and EventBridge delivery are asynchronous. Wait several minutes, then inspect the deployed rules, targets, and Lambda logs:
+
+```powershell
+# Confirm the Config recorder is active.
+aws configservice describe-configuration-recorder-status --region $region
+
+# Confirm the three compliance rules exist.
+aws configservice describe-config-rules `
+  --config-rule-names s3-public-read-prohibited sg-restricted-incoming-traffic iam-policy-no-admin-access `
+  --region $region
+
+# Confirm EventBridge rules and targets exist.
+aws events list-rules --name-prefix compliance --region $region
+aws events list-rules --name-prefix s3-policy --region $region
+aws events list-rules --name-prefix iam-policy --region $region
+aws events list-rules --name-prefix sg-ingress --region $region
+aws events list-targets-by-rule --rule config-noncompliant-remediation --region $region
+aws events list-targets-by-rule --rule s3-policy-change-remediation --region $region
+aws events list-targets-by-rule --rule iam-policy-attachment-remediation --region $region
+aws events list-targets-by-rule --rule sg-ingress-change-remediation --region $region
+
+# Review the three remediation Lambda log streams.
+aws logs tail /aws/lambda/s3_public_access_remediator --since 30m --region $region
+aws logs tail /aws/lambda/iam_policy_guardrail_remediator --since 30m --region $region
+aws logs tail /aws/lambda/security_group_ingress_remediator --since 30m --region $region
+```
+
+If a log group is not present yet, the corresponding Lambda has not written a log event. Wait and run the command again. AWS Config and EventBridge delivery can take several minutes.
+
+### 7.4 Verify the remediation result
+
+The expected result is that all three resources become compliant or restricted:
+
+```powershell
+# S3: the public bucket policy should be absent after non-prod remediation.
+aws s3api get-bucket-policy --bucket $fixtureBucket --region $region
+```
+
+`get-bucket-policy` should return a `NoSuchBucketPolicy` error after the S3 remediator removes it. If it still returns a policy, inspect the S3 Lambda log and retry the check after waiting.
+
+```powershell
+# IAM: AdministratorAccess should no longer be attached.
+aws iam list-attached-role-policies --role-name $adminRoleName
+
+# EC2: no 0.0.0.0/0 TCP/22 ingress should remain.
+aws ec2 describe-security-groups --group-ids $groupId --region $region `
+  --query "SecurityGroups[0].IpPermissions[?FromPort==\`22\` && ToPort==\`22\`]"
+```
+
+For Config evidence, query compliance after AWS Config has evaluated the resources:
+
+```powershell
+aws configservice describe-compliance-by-config-rule --region $region
+aws configservice describe-compliance-by-resource `
+  --resource-type AWS::S3::Bucket `
+  --resource-id $fixtureBucket `
+  --region $region
+aws configservice describe-compliance-by-resource `
+  --resource-type AWS::EC2::SecurityGroup `
+  --resource-id $groupId `
+  --region $region
+```
+
+Check notification and audit evidence:
+
+```powershell
+aws sns get-topic-attributes --topic-arn $topicArn --region $region
+aws sns list-subscriptions-by-topic --topic-arn $topicArn --region $region
+aws s3 ls "s3://$auditBucket/remediation/" --region $region
+```
+
+The IAM and Security Group remediation paths write audit records through the shared Lambda audit helper when `AUDIT_BUCKET_NAME` is configured. The S3 path also writes a record after removing or blocking public access.
+
+### 7.5 Test the production decision path separately
+
+The fixture Security Group is tagged `Environment=prod`. The expected behavior is quarantine/revocation plus alerting, not silent approval. Verify the tag, ingress state, Lambda log, SNS topic activity, and audit object before considering the test complete:
+
+```powershell
+aws ec2 describe-security-groups --group-ids $groupId --region $region `
+  --query 'SecurityGroups[0].Tags'
+aws logs tail /aws/lambda/security_group_ingress_remediator --since 30m --region $region
+aws s3 ls "s3://$auditBucket/remediation/" --region $region
+```
+
+The fixture itself is intentionally non-compliant, so AWS Config may report the original finding while the event-driven remediation is being processed. Use the resource-state checks above as the remediation check, then allow Config time to re-evaluate.
+
+## Step 8: Validate events, remediation, and evidence
+
+Use this final evidence check after the remediation commands in Step 7:
+
+```powershell
+$region = "us-east-1"
+$fixtureBucketArn = terraform -chdir=examples output -raw noncompliant_s3_bucket_arn
+$fixtureBucket = $fixtureBucketArn -replace '^arn:aws:s3:::', ''
+$groupId = terraform -chdir=examples output -raw prod_open_security_group_id
+$topicArn = terraform output -raw secops_alert_topic_arn
+$auditBucket = terraform output -raw audit_bucket_name
 
 aws configservice describe-compliance-by-config-rule --region $region
+aws configservice describe-compliance-by-resource `
+  --resource-type AWS::S3::Bucket `
+  --resource-id $fixtureBucket `
+  --region $region
 aws configservice describe-compliance-by-resource --resource-type AWS::EC2::SecurityGroup --resource-id $groupId --region $region
 aws logs tail /aws/lambda/s3_public_access_remediator --since 30m --region $region
+aws logs tail /aws/lambda/iam_policy_guardrail_remediator --since 30m --region $region
 aws logs tail /aws/lambda/security_group_ingress_remediator --since 30m --region $region
-aws s3 ls "s3://$(terraform output -raw audit_bucket_name)/remediation/" --region $region
+aws sns get-topic-attributes --topic-arn $topicArn --region $region
+aws s3 ls "s3://$auditBucket/remediation/" --region $region
 ```
 
 Confirm the checklist below for every scenario. For the `prod` Security Group, confirm quarantine and alert behavior rather than assuming full automatic recovery.
@@ -477,8 +577,11 @@ If a remediation action is overly aggressive or an approved exception is require
 Destroy the intentionally non-compliant fixture first:
 
 ```powershell
+$fixtureBucketArn = terraform -chdir=examples output -raw noncompliant_s3_bucket_arn
+$fixtureBucket = $fixtureBucketArn -replace '^arn:aws:s3:::', ''
+
 Push-Location examples
-terraform destroy -var='test_bucket_name=compliance-test-123456789012-20260903'
+terraform destroy -var="aws_region=us-east-1" -var="test_bucket_name=$fixtureBucket"
 Pop-Location
 ```
 
