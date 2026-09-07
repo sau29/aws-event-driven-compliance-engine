@@ -429,6 +429,8 @@ This step is **manual, deliberately opt-in, and required only when you want to s
 
 Do not run this step in production. It creates public access, an administrator policy attachment, and public SSH ingress.
 
+The public S3 test requires bucket-level S3 Block Public Access to be disabled for the disposable fixture. The fixture does this automatically. An account-level or organization-level policy that enforces `BlockPublicPolicy=true` cannot be overridden by Terraform; use a dedicated sandbox account where this test is permitted, or skip the public S3 scenario and test the IAM and Security Group scenarios instead.
+
 Run the following commands from the repository root in PowerShell. Use the same AWS account and region where the root stack is deployed. The fixture creates three intentionally unsafe resources:
 
 - S3 bucket and public-read bucket policy, tagged `Environment=non-prod`
@@ -476,6 +478,7 @@ These commands are manual verification checks. Run them immediately after the fi
 
 ```powershell
 # S3: public policy exists and the bucket is tagged non-prod.
+aws s3api get-public-access-block --bucket $fixtureBucket --region $region
 aws s3api get-bucket-policy --bucket $fixtureBucket --region $region
 aws s3api get-bucket-tagging --bucket $fixtureBucket --region $region
 aws s3api get-bucket-policy-status --bucket $fixtureBucket --region $region
