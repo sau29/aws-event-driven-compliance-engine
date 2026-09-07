@@ -122,9 +122,18 @@ Follow this order to minimize drift and avoid broken event flows:
 7. Create the audit vault in S3 with WORM retention
 8. Validate resource drift and events
 
-## Deployment commands
+## Root deployment commands
 
-Run these commands from the repository root in PowerShell. The first deployment should be performed in a dedicated sandbox account or non-production account.
+Run these commands from the repository root in PowerShell. These commands deploy the compliance engine only. They do not deploy `examples/test_resources.tf` and do not create intentionally non-compliant test resources.
+
+| Command | Purpose | Required for root deployment? |
+| --- | --- | --- |
+| `terraform fmt -recursive` | Formats Terraform files. | Recommended local check; no AWS resources are changed. |
+| `terraform init` | Downloads providers and initializes root Terraform state. | Yes, once per working directory or provider change. |
+| `terraform validate` | Checks Terraform syntax and configuration. | Yes, before planning. |
+| `aws sts get-caller-identity` | Confirms the AWS account and identity. | Yes, verify the target account before apply. |
+| `terraform plan` | Previews root resources and changes. | Yes, review before apply. |
+| `terraform apply` | Creates or updates the compliance engine. | Yes, only after plan approval. |
 
 ```powershell
 terraform fmt -recursive
@@ -135,6 +144,8 @@ terraform plan -out compliance-engine.tfplan
 terraform show -no-color compliance-engine.tfplan
 terraform apply compliance-engine.tfplan
 ```
+
+After `terraform apply`, the following root components are created automatically: AWS Config recorder and rules, the Config delivery bucket, the audit bucket, Lambda functions, EventBridge rules and targets, SNS, SSM Automation, IAM roles/policies, and optional Chatbot resources. The root apply does not simulate a violation.
 
 Capture the deployed identifiers for later validation:
 
@@ -158,7 +169,7 @@ If the plan is not expected, stop before `terraform apply` and correct the varia
 ## Step 1: Define environment and tags
 The test fixture creates and tags its own resources. Its S3 bucket and IAM role use `Environment=non-prod`; its Security Group uses `Environment=prod`. No manual tagging is required when deploying `examples/test_resources.tf`.
 
-For an existing disposable sandbox resource that is not managed by this Terraform project, first set its real ARN and then apply tags. Replace the placeholder below; never use `example-bucket` literally:
+The following is optional and applies only when testing an existing disposable AWS resource outside this Terraform project. It is not required for the normal fixture workflow in Step 7. Replace the placeholder below; never use `example-bucket` literally:
 
 ```powershell
 $testBucket = "saurabh-unique-disposable-bucket-name"
@@ -179,7 +190,7 @@ aws resourcegroupstaggingapi tag-resources `
   aws s3api get-bucket-tagging --bucket $testBucket --region us-east-1
 ```
 
-For the Terraform-managed fixture, use the fixture output instead of manually tagging the bucket:
+For the Terraform-managed fixture, use the fixture output to inspect its automatically applied tags; do not manually tag it:
 
 ```powershell
 $fixtureBucketArn = terraform -chdir=examples output -raw noncompliant_s3_bucket_arn
@@ -358,7 +369,9 @@ aws s3api get-bucket-encryption --bucket $auditBucket --region us-east-1
 ```
 
 ## Step 7: Validation testing with non-compliant resources
-This step is manual and deliberately opt-in. The fixture is separate from the root stack so a normal root apply does not create unsafe resources.
+This step is **manual, deliberately opt-in, and required only when you want to simulate violations**. The fixture is separate from the root stack so a normal root apply does not create unsafe resources. AWS Config, EventBridge, Lambda, and SSM perform detection and remediation automatically only after this fixture has been deployed and its violations exist.
+
+Do not run this step in production. It creates public access, an administrator policy attachment, and public SSH ingress.
 
 Run the following commands from the repository root in PowerShell. Use the same AWS account and region where the root stack is deployed. The fixture creates three intentionally unsafe resources:
 
@@ -369,6 +382,8 @@ Run the following commands from the repository root in PowerShell. Use the same 
 Do not substitute the root `aws-config-delivery-*` or `compliance-evidence-vault-*` bucket names. The fixture creates a separate disposable bucket.
 
 ### 7.1 Deploy the fixture
+
+This is the manual simulation trigger. Terraform creates the unsafe test resources and automatically applies their `Environment` tags. It does not deploy another compliance engine.
 
 ```powershell
 $region = "us-east-1"
@@ -401,7 +416,7 @@ Write-Host "Security Group: $groupId"
 
 ### 7.2 Confirm the initial violations
 
-Run these checks immediately after the fixture apply. They prove that the test resources were created in the intentionally non-compliant state before remediation runs:
+These commands are manual verification checks. Run them immediately after the fixture apply to prove that the resources were created in the intentionally non-compliant state before asynchronous remediation runs:
 
 ```powershell
 # S3: public policy exists and the bucket is tagged non-prod.
@@ -420,7 +435,7 @@ aws ec2 describe-security-groups --group-ids $groupId --region $region `
 
 ### 7.3 Wait for detection and remediation
 
-AWS Config evaluation and EventBridge delivery are asynchronous. Wait several minutes, then inspect the deployed rules, targets, and Lambda logs:
+AWS Config evaluation and EventBridge delivery are automatic but asynchronous. Wait several minutes, then run these manual inspection commands:
 
 ```powershell
 # Confirm the Config recorder is active.
@@ -451,7 +466,7 @@ If a log group is not present yet, the corresponding Lambda has not written a lo
 
 ### 7.4 Verify the remediation result
 
-The expected result is that all three resources become compliant or restricted:
+Lambda and SSM perform the remediation automatically. Run these manual checks to verify that all three resources become compliant or restricted:
 
 ```powershell
 # S3: the public bucket policy should be absent after non-prod remediation.
@@ -495,7 +510,7 @@ The IAM and Security Group remediation paths write audit records through the sha
 
 ### 7.5 Test the production decision path separately
 
-The fixture Security Group is tagged `Environment=prod`. The expected behavior is quarantine/revocation plus alerting, not silent approval. Verify the tag, ingress state, Lambda log, SNS topic activity, and audit object before considering the test complete:
+The fixture Security Group is tagged `Environment=prod`. Remediation and alerting are automatic, while these commands manually verify the quarantine/revocation result:
 
 ```powershell
 aws ec2 describe-security-groups --group-ids $groupId --region $region `
