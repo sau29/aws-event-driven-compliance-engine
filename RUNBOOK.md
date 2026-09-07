@@ -108,19 +108,21 @@ aws s3api get-bucket-location --bucket $configBucket
 aws s3api get-bucket-location --bucket $auditBucket
 ```
 
-The `aws resourcegroupstaggingapi tag-resources` example previously shown in this runbook used `example-bucket` as a placeholder for an existing disposable resource. It did not refer to either Terraform-managed bucket. Do not tag the Config or Compliance-mode audit bucket as part of the fixture test.
+The optional tagging commands below apply only to existing disposable resources outside this Terraform project. Do not tag the Config delivery bucket or Compliance-mode audit bucket as fixture resources.
 
-## Deployment order
-Follow this order to minimize drift and avoid broken event flows:
+## Complete execution order
 
-1. Prepare AWS account and environment tags
-2. Create base IAM roles and trust policies
-3. Deploy the detection layer
-4. Deploy EventBridge routing
-5. Deploy remediation functions and SSM automation
-6. Configure alerting via SNS and Chatbot
-7. Create the audit vault in S3 with WORM retention
-8. Validate resource drift and events
+The root stack and the `examples` stack are separate Terraform working directories with separate state files. Run root-stack commands from the repository root and fixture commands from `examples`. Do not run `terraform apply` in one directory expecting resources from the other directory to be created.
+
+1. Root stack: deploy the compliance engine
+2. Examples stack: create intentionally non-compliant resources
+3. AWS Config, EventBridge, Lambda, and SSM: detect and remediate them automatically
+4. Verify logs, resource state, SNS, Config, and audit evidence
+5. Destroy the examples fixture
+6. Destroy the root stack when finished
+7. Optional: tag an already-existing S3, Security Group, or IAM resource
+
+Steps 1 and 2 are manual Terraform commands. Step 3 is performed automatically by AWS after the fixture creates a matching violation. Step 4 is manual verification. Steps 5 and 6 are manual cleanup commands. Step 7 is unrelated to the fixture and is only for existing resources outside these Terraform states.
 
 ## Root deployment commands
 
@@ -145,6 +147,8 @@ terraform show -no-color compliance-engine.tfplan
 terraform apply compliance-engine.tfplan
 ```
 
+This completes **Phase 1: root stack deployment**. It creates the compliance engine and its supporting resources, but it does not create test violations.
+
 After `terraform apply`, the following root components are created automatically: AWS Config recorder and rules, the Config delivery bucket, the audit bucket, Lambda functions, EventBridge rules and targets, SNS, SSM Automation, IAM roles/policies, and optional Chatbot resources. The root apply does not simulate a violation.
 
 Capture the deployed identifiers for later validation:
@@ -166,29 +170,59 @@ The output is `null` when Chatbot is disabled. Internally, the AWS provider expo
 
 If the plan is not expected, stop before `terraform apply` and correct the variables or code. Terraform creates the compliance engine; it does not create the unsafe validation resources in `examples/`.
 
-## Step 1: Define environment and tags
-The test fixture creates and tags its own resources. Its S3 bucket and IAM role use `Environment=non-prod`; its Security Group uses `Environment=prod`. No manual tagging is required when deploying `examples/test_resources.tf`.
+## Optional phase: Tag existing resources
 
-The following is optional and applies only when testing an existing disposable AWS resource outside this Terraform project. It is not required for the normal fixture workflow in Step 7. Replace the placeholder below; never use `example-bucket` literally:
+This phase is separate from the numbered fixture lifecycle. Execute it only after the compliance engine is deployed and only when testing an already-existing disposable resource outside this repository. Do not run it for the Terraform-managed fixture because `examples/test_resources.tf` applies the required tags automatically. Do not tag the AWS Config delivery bucket or Compliance-mode audit bucket as test resources.
+
+Use this phase only for an already-existing disposable S3 bucket, Security Group, or IAM principal that is managed outside this repository. The resource must have an `Environment` tag with exactly `non-prod` or `prod`.
+
+### Existing S3 bucket
 
 ```powershell
-$testBucket = "saurabh-unique-disposable-bucket-name"
-$testBucketArn = "arn:aws:s3:::$testBucket"
+$region = "us-east-1"
+$existingBucket = "replace-with-existing-disposable-bucket"
 
-# 1. Create the S3 bucket
-aws s3api create-bucket `
-  --bucket $testBucket `
-  --region us-east-1
-
-# 2. Tag the bucket for non-prod auto-remediation
+aws s3api get-bucket-location --bucket $existingBucket
 aws resourcegroupstaggingapi tag-resources `
-  --resource-arn-list $testBucketArn `
+  --resource-arn-list "arn:aws:s3:::$existingBucket" `
   --tags Environment=non-prod,Owner=platform-team,Application=compliance-demo `
-  --region us-east-1
-
-# 3.To verify that the bucket was created and tagged properly:
-  aws s3api get-bucket-tagging --bucket $testBucket --region us-east-1
+  --region $region
+aws s3api get-bucket-tagging --bucket $existingBucket --region $region
 ```
+
+### Existing Security Group
+
+```powershell
+$region = "us-east-1"
+$existingGroupId = "sg-replace-me"
+
+aws ec2 describe-security-groups --group-ids $existingGroupId --region $region
+aws ec2 create-tags `
+  --resources $existingGroupId `
+  --tags Key=Environment,Value=non-prod Key=Owner,Value=platform-team `
+  --region $region
+aws ec2 describe-security-groups `
+  --group-ids $existingGroupId `
+  --query 'SecurityGroups[0].Tags' `
+  --region $region
+```
+
+### Existing IAM role
+
+```powershell
+$existingRoleName = "replace-with-existing-disposable-role"
+
+aws iam get-role --role-name $existingRoleName
+aws iam tag-role `
+  --role-name $existingRoleName `
+  --tags Key=Environment,Value=non-prod Key=Owner,Value=platform-team
+aws iam list-role-tags --role-name $existingRoleName
+```
+
+After tagging an existing resource, create a violation using the appropriate AWS CLI command in the validation section, then allow AWS Config and EventBridge to process it. Never use the root Config or audit buckets for this phase.
+
+## Step 1: Define environment and tags
+The test fixture creates and tags its own resources. Its S3 bucket and IAM role use `Environment=non-prod`; its Security Group uses `Environment=prod`. No manual tagging is required when deploying `examples/test_resources.tf`.
 
 For the Terraform-managed fixture, use the fixture output to inspect its automatically applied tags; do not manually tag it:
 
@@ -197,7 +231,7 @@ $fixtureBucketArn = terraform -chdir=examples output -raw noncompliant_s3_bucket
 aws s3api get-bucket-tagging --bucket ($fixtureBucketArn -replace '^arn:aws:s3:::', '') --region us-east-1
 ```
 
-# Sample output:
+Sample output:
 {                                                                                                          
     "TagSet": [
         {
@@ -589,7 +623,9 @@ If a remediation action is overly aggressive or an approved exception is require
 
 ## Cleanup
 
-Destroy the intentionally non-compliant fixture first:
+### Phase 5: Destroy the examples fixture
+
+Destroy the intentionally non-compliant fixture first. This removes only resources managed by the `examples` state:
 
 ```powershell
 $fixtureBucketArn = terraform -chdir=examples output -raw noncompliant_s3_bucket_arn
@@ -599,6 +635,8 @@ Push-Location examples
 terraform destroy -var="aws_region=us-east-1" -var="test_bucket_name=$fixtureBucket"
 Pop-Location
 ```
+
+### Phase 6: Destroy the root stack
 
 Destroying the root stack removes the engine resources, but Compliance-mode audit objects can remain protected until their retention period expires. Plan audit-vault lifecycle and key deletion deliberately; do not use `force_destroy` for the audit vault.
 
