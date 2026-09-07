@@ -19,7 +19,7 @@ variable "audit_retention_days" {
 variable "alert_email_endpoints" {
   description = "Email recipients for SecOps alerts."
   type        = list(string)
-  default     = []
+  default     = ["sau.agrawal@gmail.com"]
 }
 
 variable "chatbot_slack_channel_id" {
