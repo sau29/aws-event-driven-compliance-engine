@@ -124,6 +124,28 @@ The root stack and the `examples` stack are separate Terraform working directori
 
 Steps 1 and 2 are manual Terraform commands. Step 3 is performed automatically by AWS after the fixture creates a matching violation. Step 4 is manual verification. Steps 5 and 6 are manual cleanup commands. Step 7 is unrelated to the fixture and is only for existing resources outside these Terraform states.
 
+To deploy the intentionally non-compliant fixture, run this separately from the repository root. This creates the examples Terraform state and three disposable test resources; it does not redeploy the root compliance engine:
+
+```powershell
+$region = "us-east-1"
+$fixtureBucket = "compliance-test-$((Get-Random -Minimum 100000000 -Maximum 999999999))"
+
+Push-Location examples
+
+terraform init
+terraform validate
+terraform plan `
+  -var="aws_region=$region" `
+  -var="test_bucket_name=$fixtureBucket" `
+  -out test-resources.tfplan
+
+terraform apply test-resources.tfplan
+
+Pop-Location
+```
+
+After this command completes, AWS Config, EventBridge, Lambda, and SSM detect and remediate the fixture automatically. Continue with the validation commands in Step 7 to inspect logs, resource state, SNS notifications, Config findings, and audit evidence.
+
 ## Root deployment commands
 
 Run these commands from the repository root in PowerShell. These commands deploy the compliance engine only. They do not deploy `examples/test_resources.tf` and do not create intentionally non-compliant test resources.
