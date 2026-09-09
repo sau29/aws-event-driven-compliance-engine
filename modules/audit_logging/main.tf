@@ -68,6 +68,18 @@ resource "aws_kms_alias" "audit" {
   target_key_id = aws_kms_key.audit.key_id
 }
 
+resource "aws_kms_key" "s3_compliance" {
+  description             = "Customer-managed KMS key for compliant S3 default encryption"
+  deletion_window_in_days = var.kms_deletion_window_in_days
+  enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.audit_key.json
+}
+
+resource "aws_kms_alias" "s3_compliance" {
+  name          = "alias/compliance-s3-key"
+  target_key_id = aws_kms_key.s3_compliance.key_id
+}
+
 resource "random_string" "bucket_suffix" {
   length  = 8
   upper   = false

@@ -13,7 +13,7 @@ variable "audit_bucket_name_prefix" {
 variable "audit_retention_days" {
   description = "Default Compliance-mode Object Lock retention period."
   type        = number
-  default     = 365
+  default     = 1
 }
 
 variable "alert_email_endpoints" {

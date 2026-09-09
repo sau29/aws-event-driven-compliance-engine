@@ -66,17 +66,23 @@ def alert_and_audit(
         )
 
     audit_bucket = os.getenv("AUDIT_BUCKET_NAME")
+    kms_key_arn = os.getenv("KMS_KEY_ARN")
     if audit_bucket:
         key = f"remediation/{datetime.now(timezone.utc).strftime('%Y/%m/%d/%H%M%S')}-{violation_type}.json"
-        boto3.client("s3", region_name=region).put_object(
-            Bucket=audit_bucket,
-            Key=key,
-            Body=json.dumps(record, default=str).encode("utf-8"),
-            ContentType="application/json",
-        )
+        
+        put_args = {
+            "Bucket": audit_bucket,
+            "Key": key,
+            "Body": json.dumps(record, default=str).encode("utf-8"),
+            "ContentType": "application/json",
+            "ServerSideEncryption": "aws:kms",
+        }
+        if kms_key_arn:
+            put_args["SSEKMSKeyId"] = kms_key_arn
+
+        boto3.client("s3", region_name=region).put_object(**put_args)
 
     return record
-
 
 def result(event: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
     return {"statusCode": 200, "body": json.dumps(record, default=str)}

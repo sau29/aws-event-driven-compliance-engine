@@ -77,7 +77,7 @@ Create a local `terraform.tfvars` file in the repository root. Do not commit it 
 
 ```hcl
 aws_region            = "us-east-1"
-audit_retention_days  = 365
+audit_retention_days  = 1
 alert_email_endpoints = ["secops@example.com"]
 
 # Optional: set both values to enable AWS Chatbot.
@@ -124,27 +124,6 @@ The root stack and the `examples` stack are separate Terraform working directori
 
 Steps 1 and 2 are manual Terraform commands. Step 3 is performed automatically by AWS after the fixture creates a matching violation. Step 4 is manual verification. Steps 5 and 6 are manual cleanup commands. Step 7 is unrelated to the fixture and is only for existing resources outside these Terraform states.
 
-To deploy the intentionally non-compliant fixture, run this separately from the repository root. This creates the examples Terraform state and three disposable test resources; it does not redeploy the root compliance engine:
-
-```powershell
-$region = "us-east-1"
-$fixtureBucket = "compliance-test-$((Get-Random -Minimum 100000000 -Maximum 999999999))"
-
-Push-Location examples
-
-terraform init
-terraform validate
-terraform plan `
-  -var="aws_region=$region" `
-  -var="test_bucket_name=$fixtureBucket" `
-  -out test-resources.tfplan
-
-terraform apply test-resources.tfplan
-
-Pop-Location
-```
-
-After this command completes, AWS Config, EventBridge, Lambda, and SSM detect and remediate the fixture automatically. Continue with the validation commands in Step 7 to inspect logs, resource state, SNS notifications, Config findings, and audit evidence.
 
 ## Root deployment commands
 
@@ -191,6 +170,9 @@ terraform output -raw chatbot_configuration_arn
 The output is `null` when Chatbot is disabled. Internally, the AWS provider exposes this value as `chat_configuration_arn` on the `aws_chatbot_slack_channel_configuration` resource.
 
 If the plan is not expected, stop before `terraform apply` and correct the variables or code. Terraform creates the compliance engine; it does not create the unsafe validation resources in `examples/`.
+
+After this command completes, AWS Config, EventBridge, Lambda, and SSM detect and remediate the fixture automatically. Continue with the validation commands in Step 7 to inspect logs, resource state, SNS notifications, Config findings, and audit evidence.
+
 
 ## Optional phase: Tag existing resources
 
@@ -298,7 +280,12 @@ Inspect the deployed rules:
 
 ```powershell
 aws configservice describe-configuration-recorder-status --region us-east-1
-aws configservice describe-config-rules --config-rule-names s3-public-read-prohibited sg-restricted-incoming-traffic iam-policy-no-admin-access --region us-east-1
+
+aws configservice describe-config-rules --config-rule-names iam-policy-no-admin-access --region us-east-1
+
+aws configservice describe-config-rules --config-rule-names s3-public-read-prohibited --region us-east-1
+
+aws configservice describe-config-rules --config-rule-names sg-restricted-incoming-traffic --region us-east-1
 ```
 
 ## Step 3: Deploy EventBridge control plane
@@ -663,10 +650,18 @@ Pop-Location
 
 ### Phase 6: Destroy the root stack
 
+
 Destroying the root stack removes the engine resources, but Compliance-mode audit objects can remain protected until their retention period expires. Plan audit-vault lifecycle and key deletion deliberately; do not use `force_destroy` for the audit vault.
 
 ```powershell
-terraform destroy
+# 1. Forget the locked S3 bucket from Terraform state tracking
+terraform state rm module.audit_logging.aws_s3_bucket.audit
+
+# 2. Forget the random suffix generator
+terraform state rm module.audit_logging.random_string.bucket_suffix
+
+# 3. Clean up any lingering state metadata
+terraform destroy -auto-approve
 ```
 
 ## Exit criteria

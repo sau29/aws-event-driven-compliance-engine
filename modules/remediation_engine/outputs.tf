@@ -23,6 +23,11 @@ output "sg_ingress_rule_name" {
   value       = aws_cloudwatch_event_rule.sg_ingress_change.name
 }
 
+output "s3_encryption_rule_name" {
+  description = "EventBridge rule for S3 encryption configuration changes."
+  value       = aws_cloudwatch_event_rule.s3_encryption_change.name
+}
+
 output "ssm_document_name" {
   description = "The SSM Automation document used for multi-step Security Group remediation."
   value       = aws_ssm_document.security_group_remediation.name

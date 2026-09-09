@@ -14,7 +14,8 @@ output "remediation_eventbridge_rules" {
     module.remediation_engine.config_noncompliant_rule_name,
     module.remediation_engine.s3_policy_rule_name,
     module.remediation_engine.iam_policy_rule_name,
-    module.remediation_engine.sg_ingress_rule_name
+    module.remediation_engine.sg_ingress_rule_name,
+    module.remediation_engine.s3_encryption_rule_name
   ]
 }
 

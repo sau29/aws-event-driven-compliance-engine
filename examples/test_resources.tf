@@ -51,6 +51,16 @@ resource "aws_s3_bucket_public_access_block" "noncompliant_public" {
   restrict_public_buckets = false
 }
 
+resource "aws_s3_bucket_server_side_encryption_configuration" "noncompliant_public" {
+  bucket = aws_s3_bucket.noncompliant_public.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
 data "aws_iam_policy_document" "public_bucket" {
   statement {
     effect = "Allow"
@@ -103,7 +113,7 @@ resource "aws_security_group" "prod_open_ssh" {
   vpc_id      = data.aws_vpc.default.id
 
   tags = {
-    Environment = "prod"
+    Environment = "non-prod"
     TestCase    = "open-ssh"
   }
 }
@@ -132,7 +142,7 @@ check "test_fixture_tags" {
   }
 
   assert {
-    condition     = aws_security_group.prod_open_ssh.tags.Environment == "prod"
+    condition     = aws_security_group.prod_open_ssh.tags.Environment == "non-prod"
     error_message = "The Security Group fixture must be tagged Environment=prod."
   }
 }

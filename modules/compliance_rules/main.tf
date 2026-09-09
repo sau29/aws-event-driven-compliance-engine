@@ -196,6 +196,22 @@ resource "aws_config_config_rule" "s3_public_read_prohibited" {
   depends_on = [aws_config_configuration_recorder_status.this]
 }
 
+resource "aws_config_config_rule" "s3_customer_managed_kms_encryption" {
+  name        = "s3-encryption-customer-kms"
+  description = "Checks whether S3 buckets use customer-managed KMS encryption."
+
+  scope {
+    compliance_resource_types = ["AWS::S3::Bucket"]
+  }
+
+  source {
+    owner             = "AWS"
+    source_identifier = "S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED"
+  }
+
+  depends_on = [aws_config_configuration_recorder_status.this]
+}
+
 resource "aws_config_config_rule" "sg_restricted_incoming_traffic" {
   name        = "sg-restricted-incoming-traffic"
   description = "Checks whether incoming traffic is restricted to trusted sources and ports."

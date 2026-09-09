@@ -40,6 +40,10 @@ locals {
       name    = "security_group_ingress_remediator"
       handler = "security_group_ingress_remediator.lambda_handler"
     }
+    s3_encryption = {
+      name    = "s3_encryption_remediator"
+      handler = "s3_encryption_remediator.lambda_handler"
+    }
   }
 }
 
@@ -73,25 +77,33 @@ resource "aws_iam_role_policy" "lambda_remediation" {
     Version = "2012-10-17"
     Statement = [{
       Effect = "Allow"
-      Action = [
+      "Action" : [
         "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSecurityGroupRules",
         "ec2:RevokeSecurityGroupIngress",
         "iam:DetachGroupPolicy",
         "iam:DetachRolePolicy",
         "iam:DetachUserPolicy",
-        "iam:ListGroupTags",
         "iam:ListRoleTags",
         "iam:ListUserTags",
         "s3:DeleteBucketPolicy",
+        "s3:GetBucketPolicy",
         "s3:GetBucketTagging",
-        "s3:PutPublicAccessBlock",
-        "sns:Publish",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetAccountPublicAccessBlock",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutBucketTagging",
+        "s3:PutAccountPublicAccessBlock",
+        "s3:PutBucketPublicAccessBlock",
         "s3:PutObject",
         "s3:PutObjectTagging",
+        "sns:Publish",
         "kms:Encrypt",
         "kms:GenerateDataKey",
-        "kms:DescribeKey"
-      ]
+        "kms:DescribeKey",
+        "kms:ListAliases"
+      ],
       Resource = "*"
     }]
   })
@@ -112,6 +124,7 @@ resource "aws_lambda_function" "remediator" {
     variables = {
       ALERT_TOPIC_ARN   = module.remediation_engine.secops_alert_topic_arn
       AUDIT_BUCKET_NAME = module.audit_logging.audit_bucket_name
+      KMS_KEY_ARN       = module.audit_logging.s3_compliance_kms_alias_arn
     }
   }
 
@@ -136,15 +149,18 @@ module "audit_logging" {
 module "remediation_engine" {
   source = "./modules/remediation_engine"
 
-  aws_region = var.aws_region
+  aws_region                  = var.aws_region
+  s3_compliance_kms_alias_arn = module.audit_logging.s3_compliance_kms_alias_arn
 
   s3_lambda_function_name  = aws_lambda_function.remediator["s3"].function_name
   iam_lambda_function_name = aws_lambda_function.remediator["iam"].function_name
   sg_lambda_function_name  = aws_lambda_function.remediator["security_group"].function_name
 
-  s3_lambda_function_arn  = aws_lambda_function.remediator["s3"].arn
-  iam_lambda_function_arn = aws_lambda_function.remediator["iam"].arn
-  sg_lambda_function_arn  = aws_lambda_function.remediator["security_group"].arn
+  s3_lambda_function_arn             = aws_lambda_function.remediator["s3"].arn
+  iam_lambda_function_arn            = aws_lambda_function.remediator["iam"].arn
+  sg_lambda_function_arn             = aws_lambda_function.remediator["security_group"].arn
+  s3_encryption_lambda_function_name = aws_lambda_function.remediator["s3_encryption"].function_name
+  s3_encryption_lambda_function_arn  = aws_lambda_function.remediator["s3_encryption"].arn
 
   alert_email_endpoints    = var.alert_email_endpoints
   chatbot_slack_channel_id = var.chatbot_slack_channel_id
@@ -157,15 +173,17 @@ check "required_detection_rules" {
       toset(module.compliance_rules.rule_names),
       toset([
         "s3-public-read-prohibited",
+        "s3-encryption-customer-kms",
         "sg-restricted-incoming-traffic",
         "iam-policy-no-admin-access"
       ])
       ) == toset([
         "s3-public-read-prohibited",
+        "s3-encryption-customer-kms",
         "sg-restricted-incoming-traffic",
         "iam-policy-no-admin-access"
     ])
-    error_message = "All three required AWS Config detection rules must be created."
+    error_message = "All required AWS Config detection rules must be created."
   }
 }
 
@@ -174,4 +192,65 @@ check "immutable_audit_vault" {
     condition     = module.audit_logging.object_lock_mode == "COMPLIANCE" && module.audit_logging.object_lock_retention_days > 0
     error_message = "The audit vault must use positive Compliance-mode Object Lock retention."
   }
+}
+
+# 1. Create a brand-new, dedicated audit S3 bucket for CloudTrail
+resource "aws_s3_bucket" "cloudtrail_audit_bucket" {
+  bucket        = "saurabh-compliance-trail-audit-vault-2026"
+  force_destroy = true
+
+  tags = {
+    Environment = "non-prod"
+    Purpose     = "CloudTrail-Audit-Vault"
+  }
+}
+
+# 2. Attach the required bucket policy so CloudTrail can write logs to it
+resource "aws_s3_bucket_policy" "cloudtrail_audit_policy" {
+  bucket = aws_s3_bucket.cloudtrail_audit_bucket.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AWSCloudTrailAclCheck"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action   = "s3:GetBucketAcl"
+        Resource = aws_s3_bucket.cloudtrail_audit_bucket.arn
+      },
+      {
+        Sid    = "AWSCloudTrailWrite"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.cloudtrail_audit_bucket.arn}/AWSLogs/*"
+        Condition = {
+          StringEquals = {
+            "s3:x-amz-acl" = "bucket-owner-full-control"
+          }
+        }
+      }
+    ]
+  })
+}
+
+# 3. Create the CloudTrail trail linked to the new bucket above
+resource "aws_cloudtrail" "main_compliance_trail" {
+  name                          = "event-engine-cloudtrail"
+  s3_bucket_name                = aws_s3_bucket.cloudtrail_audit_bucket.id
+  include_global_service_events = true
+  is_multi_region_trail         = true
+  enable_log_file_validation    = true
+
+  event_selector {
+    read_write_type           = "All"
+    include_management_events = true
+  }
+
+  depends_on = [aws_s3_bucket_policy.cloudtrail_audit_policy]
 }

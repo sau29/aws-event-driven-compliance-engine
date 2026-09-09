@@ -37,6 +37,22 @@ variable "sg_lambda_function_arn" {
   type        = string
 }
 
+variable "s3_encryption_lambda_function_name" {
+  description = "Name of the S3 encryption remediation Lambda function."
+  type        = string
+  default     = "s3_encryption_remediator"
+}
+
+variable "s3_encryption_lambda_function_arn" {
+  description = "ARN of the S3 encryption remediation Lambda function."
+  type        = string
+}
+
+variable "s3_compliance_kms_alias_arn" {
+  description = "Regional customer-managed KMS alias used for S3 encryption remediation."
+  type        = string
+}
+
 variable "sns_topic_name" {
   description = "Name of the SNS topic used for SecOps compliance alerts."
   type        = string

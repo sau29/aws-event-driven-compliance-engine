@@ -18,6 +18,7 @@ locals {
   s3_policy_event_rule_name           = "s3-policy-change-remediation"
   iam_policy_event_rule_name          = "iam-policy-attachment-remediation"
   sg_ingress_event_rule_name          = "sg-ingress-change-remediation"
+  s3_encryption_event_rule_name       = "s3-encryption-change-remediation"
 }
 
 resource "aws_sns_topic" "secops_alerts" {
@@ -76,6 +77,7 @@ resource "aws_cloudwatch_event_rule" "config_noncompliant" {
       newEvaluationResult = ["NON_COMPLIANT"],
       configRuleName = [
         "s3-public-read-prohibited",
+        "s3-encryption-customer-kms",
         "sg-restricted-incoming-traffic",
         "iam-policy-no-admin-access"
       ]
@@ -135,6 +137,20 @@ resource "aws_cloudwatch_event_rule" "sg_ingress_change" {
   })
 }
 
+resource "aws_cloudwatch_event_rule" "s3_encryption_change" {
+  name        = local.s3_encryption_event_rule_name
+  description = "Routes S3 encryption configuration changes to the S3 encryption remediator."
+
+  event_pattern = jsonencode({
+    source        = ["aws.s3"],
+    "detail-type" = ["AWS API Call via CloudTrail"],
+    detail = {
+      eventSource = ["s3.amazonaws.com"],
+      eventName   = ["PutBucketEncryption", "DeleteBucketEncryption"]
+    }
+  })
+}
+
 resource "aws_lambda_permission" "config_noncompliant_s3" {
   statement_id  = "AllowEventBridgeToInvokeS3Remediator"
   action        = "lambda:InvokeFunction"
@@ -183,10 +199,24 @@ resource "aws_lambda_permission" "sg_ingress_change" {
   source_arn    = aws_cloudwatch_event_rule.sg_ingress_change.arn
 }
 
+resource "aws_lambda_permission" "s3_encryption_change" {
+  statement_id  = "AllowEventBridgeToInvokeS3EncryptionRemediator"
+  action        = "lambda:InvokeFunction"
+  function_name = var.s3_encryption_lambda_function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.s3_encryption_change.arn
+}
+
 resource "aws_cloudwatch_event_target" "config_to_s3_lambda" {
   rule      = aws_cloudwatch_event_rule.config_noncompliant.name
   target_id = "s3-remediation-lambda"
   arn       = var.s3_lambda_function_arn
+}
+
+resource "aws_cloudwatch_event_target" "config_to_s3_encryption_lambda" {
+  rule      = aws_cloudwatch_event_rule.config_noncompliant.name
+  target_id = "s3-encryption-config-remediation-lambda"
+  arn       = var.s3_encryption_lambda_function_arn
 }
 
 resource "aws_cloudwatch_event_target" "config_to_iam_lambda" {
@@ -217,6 +247,12 @@ resource "aws_cloudwatch_event_target" "sg_policy_to_lambda" {
   rule      = aws_cloudwatch_event_rule.sg_ingress_change.name
   target_id = "sg-direct-ingress-remediation"
   arn       = var.sg_lambda_function_arn
+}
+
+resource "aws_cloudwatch_event_target" "s3_encryption_to_lambda" {
+  rule      = aws_cloudwatch_event_rule.s3_encryption_change.name
+  target_id = "s3-encryption-remediation-lambda"
+  arn       = var.s3_encryption_lambda_function_arn
 }
 
 resource "aws_cloudwatch_event_target" "sg_policy_to_ssm" {

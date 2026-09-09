@@ -17,6 +17,7 @@ output "rule_names" {
   description = "AWS Config managed rule names created by this module."
   value = [
     aws_config_config_rule.s3_public_read_prohibited.name,
+    aws_config_config_rule.s3_customer_managed_kms_encryption.name,
     aws_config_config_rule.sg_restricted_incoming_traffic.name,
     aws_config_config_rule.iam_policy_no_admin_access.name
   ]
@@ -26,6 +27,7 @@ output "rule_arns" {
   description = "AWS Config managed rule ARNs created by this module."
   value = [
     aws_config_config_rule.s3_public_read_prohibited.arn,
+    aws_config_config_rule.s3_customer_managed_kms_encryption.arn,
     aws_config_config_rule.sg_restricted_incoming_traffic.arn,
     aws_config_config_rule.iam_policy_no_admin_access.arn
   ]

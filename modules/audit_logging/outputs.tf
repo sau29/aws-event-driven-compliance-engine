@@ -27,6 +27,16 @@ output "audit_kms_alias_arn" {
   value       = aws_kms_alias.audit.arn
 }
 
+output "s3_compliance_kms_key_arn" {
+  description = "ARN of the customer-managed KMS key used for compliant S3 encryption."
+  value       = aws_kms_key.s3_compliance.arn
+}
+
+output "s3_compliance_kms_alias_arn" {
+  description = "Regional alias ARN for compliant S3 encryption."
+  value       = aws_kms_alias.s3_compliance.arn
+}
+
 output "audit_bucket_write_policy_json" {
   description = "Resource policy applied to the audit bucket for configured writer roles."
   value       = data.aws_iam_policy_document.audit_bucket.json

@@ -1,6 +1,7 @@
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 
 from common import alert_and_audit, environment_from_tags, event_detail, result
 
@@ -29,21 +30,33 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if not group_id:
         raise ValueError("Security Group ID was not present in the event")
 
-    ec2 = boto3.client("ec2")
-    group = ec2.describe_security_groups(GroupIds=[group_id])["SecurityGroups"][0]
+    # Initialize EC2 client with the explicit event region
+    region = event.get("region", "us-east-1")
+    ec2 = boto3.client("ec2", region_name=region)
+
+    try:
+        group = ec2.describe_security_groups(GroupIds=[group_id])["SecurityGroups"][0]
+    except ClientError as e:
+        # Gracefully handle stale events for security groups that no longer exist
+        if e.response["Error"]["Code"] in ["InvalidGroup.NotFound", "InvalidGroupId.Malformed"]:
+            outcome = f"skipped: security group {group_id} no longer exists"
+            resource_arn = f"arn:aws:ec2:{region}:{event.get('account', 'unknown')}:security-group/{group_id}"
+            record = alert_and_audit(event, "security-group-open-ingress", "non-prod", outcome, resource_arn)
+            return result(event, record)
+        raise e
+
     environment = environment_from_tags(group.get("Tags", []))
     open_permissions = open_sensitive_permissions(group)
-    if open_permissions:
+    
+    if open_permissions and environment == "non-prod":
         ec2.revoke_security_group_ingress(GroupId=group_id, IpPermissions=open_permissions)
-        outcome = (
-            "auto-remediated: open sensitive-port ingress revoked"
-            if environment == "non-prod"
-            else "quarantined: open sensitive-port ingress revoked; alert emitted"
-        )
+        outcome = "auto-remediated: open sensitive-port ingress revoked"
+    elif open_permissions and environment == "prod":
+        outcome = "quarantined: open sensitive-port ingress detected; alert emitted"
     else:
         outcome = "no action: no open sensitive-port ingress found"
 
-    resource_arn = f"arn:aws:ec2:{event.get('region', 'unknown')}:{event.get('account', 'unknown')}:security-group/{group_id}"
+    resource_arn = f"arn:aws:ec2:{region}:{event.get('account', 'unknown')}:security-group/{group_id}"
     record = alert_and_audit(event, "security-group-open-ingress", environment, outcome, resource_arn)
     return result(event, record)
 
